@@ -2,18 +2,22 @@ import scanpy as sc
 import pandas as pd
 import numpy as np
 from typing import Iterable, Optional, Sequence, Tuple, Union
+from urllib.request import urlretrieve
 
 
-def load_umi_table(
+# ----------------------------
+# 1) Loading (cells x genes)
+# ----------------------------
+def load_umi_table_cells_x_genes(
     path_or_df: Union[str, pd.DataFrame],
     sep: str = "\t",
     index_col: int = 0
 ) -> sc.AnnData:
     """
-    Create AnnData from a UMI count matrix in genes x cells orientation.
+    Create AnnData from a UMI count matrix in cells x genes orientation.
 
     Args:
-        path_or_df: File path to a delimited matrix (genes x cells) or a preloaded DataFrame.
+        path_or_df: File path to a delimited matrix (cells x genes) or a preloaded DataFrame.
         sep: Delimiter used in the text file when a path is provided.
         index_col: Index column for pandas when a path is provided.
 
@@ -24,221 +28,240 @@ def load_umi_table(
         df = pd.read_csv(path_or_df, sep=sep, index_col=index_col)
     else:
         df = path_or_df
-    adata = sc.AnnData(df.T)
+
+    adata = sc.AnnData(df)  # already cells x genes
+
+    # Clean / unique gene names
     adata.var_names = adata.var_names.astype(str).str.strip()
     adata.var_names_make_unique()
+
     return adata
 
 
 def add_raw_counts_layer(adata: sc.AnnData, layer_name: str = "counts") -> sc.AnnData:
-    """
-    Store the current X matrix as a raw counts layer.
-
-    Args:
-        adata: Input AnnData.
-        layer_name: Name of the layer to store counts.
-
-    Returns:
-        The same AnnData with counts copied to the specified layer.
-    """
+    """Store the current X as raw counts layer."""
     adata.layers[layer_name] = adata.X.copy()
     return adata
 
 
+# ----------------------------
+# 2) QC + filtering
+# ----------------------------
 def compute_qc_and_filter(
     adata: sc.AnnData,
     mt_prefix: str = "MT-",
-    min_counts: int = 1000,
-    max_pct_mt: float = 15.0,
-    min_cells: int = 10
+    min_counts: int = 1000,     # exclude cells with <1000 UMI
+    min_genes: int = 200,       # exclude cells with <200 genes
+    max_pct_mt: float = 15.0,   # exclude cells with >15% mitochondrial
+    min_cells: int = 10         # exclude genes detected in <10 cells
 ) -> sc.AnnData:
     """
-    Compute QC metrics and filter low-quality cells/genes.
-
-    Args:
-        adata: Input AnnData.
-        mt_prefix: Prefix used to flag mitochondrial genes (case-insensitive).
-        min_counts: Minimum total UMI per cell to retain.
-        max_pct_mt: Maximum percent mitochondrial UMIs per cell to retain.
-        min_cells: Keep genes expressed in at least this many cells.
-
-    Returns:
-        Filtered AnnData.
+    QC metrics and filtering according to:
+      - total_counts >= 1000
+      - n_genes_by_counts >= 200
+      - pct_counts_mt <= 15
+      - genes expressed in >= 10 cells
     """
     adata.var["mt"] = adata.var_names.str.upper().str.startswith(mt_prefix.upper())
     sc.pp.calculate_qc_metrics(adata, qc_vars=["mt"], inplace=True)
-    adata._inplace_subset_obs((adata.obs["total_counts"] >= min_counts) & (adata.obs["pct_counts_mt"] <= max_pct_mt))
+
+    cell_mask = (
+        (adata.obs["total_counts"] >= min_counts) &
+        (adata.obs["n_genes_by_counts"] >= min_genes) &
+        (adata.obs["pct_counts_mt"] <= max_pct_mt)
+    )
+    adata = adata[cell_mask, :].copy()
+
     sc.pp.filter_genes(adata, min_cells=min_cells)
+
     return adata
 
 
+# ----------------------------
+# 3) Normalize + log
+# ----------------------------
 def normalize_and_log(
     adata: sc.AnnData,
-    target_sum: float = 1e4,
-    layer_for_log: Optional[str] = None
+    target_sum: float = 1e4
 ) -> sc.AnnData:
     """
-    Library-size normalize and log1p-transform.
-
-    Args:
-        adata: Input AnnData.
-        target_sum: Target library size per cell after normalization.
-        layer_for_log: If provided, log-transform that layer into X; else log-transform X.
-
-    Returns:
-        Normalized and log-transformed AnnData.
+    Normalize each cell to target_sum UMIs and log1p-transform into adata.X.
     """
     sc.pp.normalize_total(adata, target_sum=target_sum)
-    sc.pp.log1p(adata, layer=layer_for_log)
-    if layer_for_log is not None:
-        adata.X = adata.layers[layer_for_log].copy()
+    sc.pp.log1p(adata)
     return adata
 
 
-def select_hvgs_with_panel(
+# ----------------------------
+# 4) HVG + keep PRM1/2
+# ----------------------------
+def select_hvgs_and_targets(
     adata: sc.AnnData,
     n_top_genes: int = 3000,
     flavor: str = "seurat_v3",
     hvg_layer: str = "counts",
-    panel_genes: Optional[Iterable[str]] = None
+    targets: Sequence[str] = ("PRM1", "PRM2"),
 ) -> sc.AnnData:
     """
-    Mark HVGs on a specified layer and subset variables to HVGs ∪ panel_genes.
-
-    Args:
-        adata: Input AnnData.
-        n_top_genes: Number of HVGs to select.
-        flavor: HVG selection flavor.
-        hvg_layer: Layer to compute HVGs on (typically raw counts).
-        panel_genes: Additional genes to always include if present.
-
-    Returns:
-        AnnData subset to HVGs and panel genes.
+    Select top HVGs (computed on raw counts layer by default) and ensure PRM1/PRM2 are kept if present.
     """
-    sc.pp.highly_variable_genes(adata, n_top_genes=n_top_genes, flavor=flavor, layer=hvg_layer, subset=False)
-    keep = set(adata.var_names[adata.var["highly_variable"]])
-    if panel_genes is not None:
-        keep |= {g for g in panel_genes if g in adata.var_names}
-    keep = list(keep)
+    sc.pp.highly_variable_genes(
+        adata,
+        n_top_genes=n_top_genes,
+        flavor=flavor,
+        layer=hvg_layer,
+        subset=False
+    )
+
+    hvg_set = set(adata.var_names[adata.var["highly_variable"]])
+    keep = set(hvg_set)
+
+    # Force-keep targets if present
+    keep |= {g for g in targets if g in adata.var_names}
+
+    keep = [g for g in keep if g in adata.var_names]
     adata = adata[:, keep].copy()
     return adata
 
 
-def run_embedding_and_clustering(
+# ----------------------------
+# 5) TF list + final matrix (TFs + PRM1/2)
+# ----------------------------
+def download_human_tf_list(
+    url: str = "https://resources.aertslab.org/cistarget/tf_lists/allTFs_hg38.txt",
+    local_path: str = "hs_tfs_hg38.txt"
+) -> Sequence[str]:
+    """
+    Download and load a human TF list (hg38) from Aerts lab resources.
+    """
+    urlretrieve(url, local_path)
+    tf_list = (
+        pd.read_csv(local_path, header=None)[0]
+        .astype(str)
+        .str.strip()
+        .tolist()
+    )
+    return tf_list
+
+
+def build_expr_matrix_for_model(
     adata: sc.AnnData,
-    scale_max: float = 10.0,
-    n_neighbors: int = 15,
-    n_pcs: int = 40,
-    umap_min_dist: float = 0.5,
-    leiden_resolution: float = 1.0,
-    random_state: int = 0
-) -> sc.AnnData:
+    tf_list: Sequence[str],
+    targets: Sequence[str] = ("PRM1", "PRM2"),
+    zscore: bool = True
+) -> pd.DataFrame:
     """
-    Scale, compute PCA, neighborhood graph, UMAP, and Leiden clusters.
-
-    Args:
-        adata: Input AnnData.
-        scale_max: Cap for scaled expression values.
-        n_neighbors: Number of neighbors for graph construction.
-        n_pcs: Number of principal components.
-        umap_min_dist: UMAP min_dist parameter.
-        leiden_resolution: Leiden resolution parameter.
-        random_state: Random seed used by PCA/UMAP for reproducibility.
-
-    Returns:
-        AnnData with PCA/UMAP/Leiden results.
+    Build final expression matrix: cells x (TFs + PRM1/PRM2).
+    Uses adata.X (log-normalized).
+    Optionally applies per-gene z-score.
     """
-    sc.pp.scale(adata, max_value=scale_max)
-    sc.tl.pca(adata, svd_solver="arpack", random_state=random_state)
-    sc.pp.neighbors(adata, n_neighbors=n_neighbors, n_pcs=n_pcs, random_state=random_state)
-    sc.tl.umap(adata, min_dist=umap_min_dist, random_state=random_state)
-    sc.tl.leiden(adata, resolution=leiden_resolution, key_added="leiden")
-    return adata
+    X = pd.DataFrame(
+        adata.X.A if hasattr(adata.X, "A") else adata.X,
+        index=adata.obs_names,
+        columns=adata.var_names
+    )
+
+    tfs_in_data = [t for t in tf_list if t in X.columns]
+    keep_cols = sorted(set(tfs_in_data).union(targets))
+    keep_cols = [c for c in keep_cols if c in X.columns]
+
+    missing_targets = [g for g in targets if g not in keep_cols]
+    if missing_targets:
+        raise ValueError(f"Missing targets after filtering: {missing_targets}")
+
+    expr_sub = X.loc[:, keep_cols].copy()
+
+    if zscore:
+        expr_sub = (expr_sub - expr_sub.mean(axis=0)) / expr_sub.std(axis=0).replace(0, np.nan)
+        expr_sub = expr_sub.fillna(0.0)
+
+    return expr_sub
 
 
-def quick_umap_plot(
-    adata: sc.AnnData,
-    color: Sequence[str],
-    wspace: float = 0.4,
-    show: bool = True,
-    save: Optional[str] = None
-) -> None:
-    """
-    Convenience wrapper for UMAP visualization.
-
-    Args:
-        adata: Input AnnData with UMAP computed.
-        color: List of obs/var names to color by (e.g., ["leiden", "GAPDH"]).
-        wspace: Horizontal spacing between panels.
-        show: Whether to display the plot.
-        save: If provided, a string filename (e.g., "umap.png") to save the figure.
-    """
-    sc.pl.umap(adata, color=list(color), wspace=wspace, show=show, save=save)
-
-
-def universal_scrna_pipeline(
+# ----------------------------
+# 6) End-to-end pipeline
+# ----------------------------
+def universal_scrna_pipeline_for_tf_plus_protamines(
     path_or_df: Union[str, pd.DataFrame],
     sep: str = "\t",
     index_col: int = 0,
     mt_prefix: str = "MT-",
     min_counts: int = 1000,
+    min_genes: int = 200,
     max_pct_mt: float = 15.0,
     min_cells: int = 10,
     target_sum: float = 1e4,
     n_top_genes: int = 3000,
     hvg_flavor: str = "seurat_v3",
     hvg_layer: str = "counts",
-    panel_genes: Optional[Iterable[str]] = ("PRM1", "PRM2", "GAPDH"),
-    scale_max: float = 10.0,
-    n_neighbors: int = 15,
-    n_pcs: int = 40,
-    umap_min_dist: float = 0.5,
-    leiden_resolution: float = 1.0,
-    plot: bool = True,
-    plot_genes: Optional[Sequence[str]] = None,
-    random_state: int = 0
-) -> sc.AnnData:
+    targets: Sequence[str] = ("PRM1", "PRM2"),
+    tf_list_url: str = "https://resources.aertslab.org/cistarget/tf_lists/allTFs_hg38.txt",
+    tf_list_local_path: str = "hs_tfs_hg38.txt",
+    zscore: bool = True,
+) -> Tuple[sc.AnnData, pd.DataFrame]:
     """
-    End-to-end Scanpy workflow: load, QC, normalize, HVG select (with panel), PCA/UMAP/Leiden, optional plotting.
+    Dataset-specific pipeline:
 
-    Args:
-        path_or_df: File path to counts (genes x cells) or a DataFrame of same shape.
-        sep: Delimiter when reading from file.
-        index_col: Index column when reading from file.
-        mt_prefix: Prefix identifying mitochondrial genes.
-        min_counts: Minimum total counts per cell.
-        max_pct_mt: Maximum mitochondrial percent per cell.
-        min_cells: Minimum cells per gene.
-        target_sum: Normalization target per cell.
-        n_top_genes: Number of HVGs to select.
-        hvg_flavor: HVG selection flavor.
-        hvg_layer: Layer used to compute HVGs (should be raw counts).
-        panel_genes: Extra genes to force-keep if present.
-        scale_max: Clipping value in scaling.
-        n_neighbors: Neighbors for graph construction.
-        n_pcs: Number of PCs.
-        umap_min_dist: UMAP min_dist.
-        leiden_resolution: Leiden resolution.
-        plot: If True, draws a UMAP colored by clusters and selected genes.
-        plot_genes: Additional genes to plot alongside "leiden".
-        random_state: Seed for reproducibility.
-
-    Returns:
-        Processed AnnData object ready for downstream analyses.
+    - Input table is cells x genes
+    - Remove cells with:
+        * < 1000 UMI
+        * < 200 genes
+        * > 15% mitochondrial
+    - Remove genes detected in < 10 cells
+    - Normalize to 10,000 UMI per cell + log1p
+    - Select top 3,000 HVGs
+    - Finally keep ONLY: Transcription factors + PRM1/PRM2 (for the model)
+    - Return:
+        * processed AnnData (after HVG/targets subsetting)
+        * final matrix expr_sub (cells x (TFs + PRM1/PRM2)), optionally z-scored
     """
-    adata = load_umi_table(path_or_df, sep=sep, index_col=index_col)
+    # 1) Load (cells x genes)
+    adata = load_umi_table_cells_x_genes(path_or_df, sep=sep, index_col=index_col)
+
+    # 2) Save raw counts for HVG
     add_raw_counts_layer(adata, layer_name=hvg_layer)
-    compute_qc_and_filter(adata, mt_prefix=mt_prefix, min_counts=min_counts, max_pct_mt=max_pct_mt, min_cells=min_cells)
-    normalize_and_log(adata, target_sum=target_sum)
-    adata = select_hvgs_with_panel(adata, n_top_genes=n_top_genes, flavor=hvg_flavor, hvg_layer=hvg_layer, panel_genes=panel_genes)
-    run_embedding_and_clustering(adata, scale_max=scale_max, n_neighbors=n_neighbors, n_pcs=n_pcs, umap_min_dist=umap_min_dist, leiden_resolution=leiden_resolution, random_state=random_state)
 
-    if plot:
-        to_color = ["leiden"]
-        if plot_genes is not None:
-            to_color += [g for g in plot_genes if g in adata.var_names]
-        elif panel_genes is not None:
-            to_color += [g for g in panel_genes if g in adata.var_names]
-        quick_umap_plot(adata, color=to_color, wspace=0.4, show=True, save=None)
+    # 3) QC + filtering (cells + genes)
+    adata = compute_qc_and_filter(
+        adata,
+        mt_prefix=mt_prefix,
+        min_counts=min_counts,
+        min_genes=min_genes,
+        max_pct_mt=max_pct_mt,
+        min_cells=min_cells
+    )
 
-    return adata
+    # 4) Normalize to 10,000 UMI + log1p
+    adata = normalize_and_log(adata, target_sum=target_sum)
+
+    # 5) HVG (3000) + ensure PRM1/PRM2
+    adata = select_hvgs_and_targets(
+        adata,
+        n_top_genes=n_top_genes,
+        flavor=hvg_flavor,
+        hvg_layer=hvg_layer,
+        targets=targets
+    )
+
+    # 6) Download TF list and create final model matrix: TFs + PRM1/PRM2
+    tf_list = download_human_tf_list(url=tf_list_url, local_path=tf_list_local_path)
+    expr_sub = build_expr_matrix_for_model(adata, tf_list=tf_list, targets=targets, zscore=zscore)
+
+    print(f"After HVG/targets: adata shape = {adata.shape} (cells x genes)")
+    print(f"Final model matrix shape: {expr_sub.shape} (cells x (TFs + targets))")
+
+    return adata, expr_sub
+
+
+# ----------------------------
+# Example usage:
+# ----------------------------
+# adata, expr_sub = universal_scrna_pipeline_for_tf_plus_protamines(
+#     "/content/Combined_UMI_table.txt",
+#     sep="\t",
+#     index_col=0,
+#     targets=("PRM1", "PRM2"),
+#     zscore=True
+# )
+# print(expr_sub.columns[:10])
+
