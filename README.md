@@ -16,8 +16,8 @@ The approach produces interpretable, testable hypotheses for experimental valida
 | File / Folder | Description |
 |----------------|-------------|
 | `scGeneRAI.py` | Core implementation of the optimized scGeneRAI model with relevance propagation (LRP) for GRN inference. |
-| `scanpy_pipeline.py` | Data preprocessing module using Scanpy, including quality control, normalization, HVG selection, PCA, UMAP, and clustering. |
-| `fit_predict_edges.py` | High-level wrapper to train scGeneRAI, extract TF→target edges, and aggregate relevance scores. |
+| `data_preprocessing.py` | Data preprocessing with QC, normalization, and HVG selection (including PRM1/PRM2). |
+| `train_and_predict.py` | scGeneRAI-based model fitting and LRP network extraction utilities. |
 | `bootstrap_stability.py` | Statistical module for bootstrap-based stability analysis of inferred regulatory edges. |
 
 ---
@@ -26,8 +26,7 @@ The approach produces interpretable, testable hypotheses for experimental valida
 
 1. **Preprocessing with Scanpy**
    - Performs filtering, normalization, log transformation, and highly variable gene selection.
-   - Retains a specified gene panel of interest (e.g., PRM1, PRM2, GAPDH).
-   - Computes PCA, nearest neighbors, UMAP embedding, and Leiden clusters.
+   - Retains a specified gene panel of interest (e.g., PRM1, PRM2).
 
 2. **Model Training and Network Inference**
    - Uses an optimized scGeneRAI model to infer TF→target regulatory relationships.
