@@ -155,8 +155,8 @@ def print_bootstrap_summary(
 #         depth=DEPTH
 #     )
 #
-# R_BOOT = 20
-# KEEP_FRAC_BOOT = 0.7
+# R_BOOT = 50
+# KEEP_FRAC_BOOT = 0.75
 # TOPK = 20
 # rng = np.random.default_rng(42)
 #
