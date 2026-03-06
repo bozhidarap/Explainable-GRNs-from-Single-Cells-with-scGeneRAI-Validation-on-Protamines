@@ -1,13 +1,16 @@
 # End-to-End Gene Regulatory Network Inference Pipeline using Optimized scGeneRAI
 
 ## Overview
+Protamine 1 (**PRM1**) and protamine 2 (**PRM2**) are essential for packaging sperm DNA and maintaining genome stability during spermatogenesis. Alterations in their expression levels have been associated with male infertility, highlighting the importance of understanding the regulatory mechanisms controlling these genes.
 
-Understanding the regulation of protamine genes is essential for insights into spermatogenesis and male fertility.  
-This repository provides an **end-to-end pipeline** for **gene regulatory network (GRN)** inference built on an optimized version of the **scGeneRAI** method.  
-The pipeline integrates single-cell data preprocessing, neural network–based inference of transcriptional regulation, and bootstrap-based stability assessment.  
+This project investigates protamine regulation using an **end-to-end computational pipeline** that integrates transcriptomic preprocessing with **gene regulatory network (GRN) inference** based on an optimized implementation of **scGeneRAI**. The pipeline identifies candidate transcription factors that may regulate **PRM1** and **PRM2**, providing insights into the transcriptional control of spermatogenesis.
 
-A case study on **PRM1** and **PRM2** demonstrates how the method identifies putative transcriptional regulators, several of which are supported by published evidence.  
-The approach produces interpretable, testable hypotheses for experimental validation and contributes a practical framework for GRN discovery in fertility research.
+Among the predicted regulators, **HMGB4** and **TBPL1** have previously been linked to chromatin regulation and germ cell development, supporting the biological relevance of the inferred interactions. The analysis also identified **CREM**, a well-established regulator of spermatogenesis, indicating the pipeline’s ability to recover high-confidence regulatory candidates.
+
+To further evaluate the robustness of the predictions, results were compared with those obtained using other GRN inference methods, including **GENIE3**, **GRNBoost2**, and **CLR**. Transcription factors consistently identified across methods represent promising candidates for future experimental validation and fertility-related studies.
+
+Overall, the pipeline provides an efficient and interpretable framework for studying gene regulation in spermatogenesis. Its targeted design enables GRN inference with minimal computational resources and allows application to diverse **scRNA-seq datasets** across tissues and cell types.
+
 
 ---
 
@@ -19,7 +22,10 @@ The approach produces interpretable, testable hypotheses for experimental valida
 | `data_preprocessing.py` | Data preprocessing with QC, normalization, and HVG selection (including PRM1/PRM2). |
 | `train_and_predict.py` | scGeneRAI-based model fitting and LRP network extraction utilities. |
 | `bootstrap_stability.py` | Statistical module for bootstrap-based stability analysis of inferred regulatory edges. |
-
+| `existing_methods/` | Implementations of commonly used GRN inference methods for comparison. |
+| `existing_methods/GRNboost2.ipynb` | Notebook implementing GRNBoost2 for transcription factor–target inference. |
+| `existing_methods/GENIE3.ipynb` | Notebook implementing the GENIE3 random forest–based GRN inference method. |
+| `existing_methods/CLR_GRN.ipynb` | Notebook implementing the Context Likelihood of Relatedness (CLR) method for GRN reconstruction. |
 ---
 
 ## Pipeline Summary
